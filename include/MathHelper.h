@@ -11,8 +11,7 @@ public:
 	MathHelper(void);
 
 	static int Compare(double a,double b);//比较两个浮点数的大小
-
-	static int GaussianElimination(double **a,bool *l,double *ans,const int &n);//高斯消元解方程组
+	
 	~MathHelper(void);
 };
 
