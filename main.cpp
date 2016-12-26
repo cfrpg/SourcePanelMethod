@@ -5,6 +5,11 @@
 #include "Airfoil.h"
 #include <cmath>
 #include <cstdlib>
+#include <gsl/gsl_linalg.h>
+#include <gsl/gsl_matrix.h>
+#include <gsl/gsl_permutation.h>
+#include <gsl/gsl_vector.h>
+#include <gsl/gsl_blas.h>
 
 using namespace std;
 
@@ -61,11 +66,12 @@ int main(int argc,char *argv[])
 //Vector2 v:来流速度
 int SourcePanelMethod(Airfoil &airfoil,char* path,Vector2 v)
 {
-	double **mat;	//计算源强度的方程组的增广矩阵
-	double **mat2;	//计算压力系数的积分矩阵
-	bool *l;		//高斯消元用
-	double *ans;	//高斯消元用，值为点源强度
-	double *cp;		//压力系数
+	gsl_matrix *mat;	//计算源强度的方程组的矩阵
+	gsl_matrix *mat2;	//计算压力系数的积分矩阵
+	gsl_vector *strength;	//面源强度
+	gsl_vector *b;	//方程组常数项
+	gsl_permutation *p;
+	gsl_vector *cp;		//压力系数
 	int n;			//面源个数
 	ofstream out;
 	//临时变量
@@ -81,25 +87,24 @@ int SourcePanelMethod(Airfoil &airfoil,char* path,Vector2 v)
 		return -1;
 	}
 	n=airfoil.Panels.size();
+
 	//申请内存
 	printf("Seting memory...\n");
-	mat=(double**)malloc((n+2)*sizeof(double*));
-	mat2=(double**)malloc((n+2)*sizeof(double*));
-	for(int i=0;i<=n+1;i++)
-	{
-		mat[i]=(double*)malloc((n+2)*sizeof(double));
-		mat2[i]=(double*)malloc((n+2)*sizeof(double));
-	}
-	l=(bool*)malloc((n+1)*sizeof(bool));
-	ans=(double*)malloc((n+1)*sizeof(double));
-	cp=(double*)malloc((n+1)*sizeof(double));
+	mat=gsl_matrix_alloc(n,n);
+	mat2=gsl_matrix_alloc(n,n);
+    strength=gsl_vector_alloc(n);
+    b=gsl_vector_alloc(n);
+	cp=gsl_vector_alloc(n);
+	p=gsl_permutation_alloc(n);
+	gsl_permutation_init(p);
+
 	printf("Calcing factor mat...\n");
 	//计算系数矩阵
 	//Ax=b
 	for(int i=0;i<n;i++)
 	{
 		//计算b,也就是自由来流产生的法向速度的相反数
-		mat[i][n]=-Vector2::Dot(v,airfoil.Panels[i].GetNormal())*2*PI;
+		gsl_vector_set(b,i,-Vector2::Dot(v,airfoil.Panels[i].GetNormal())*2*PI);
 	}
 	for(int i=0;i<n;i++)//计算系数矩阵A
 	{
@@ -107,8 +112,8 @@ int SourcePanelMethod(Airfoil &airfoil,char* path,Vector2 v)
 		{
 			if(i==j)
 			{
-				mat[j][i]=PI;
-				mat2[i][j]=0;//面源对自己不起作用
+				gsl_matrix_set(mat,i,j,PI);
+				gsl_matrix_set(mat2,i,j,0);
 			}
 			else
 			{
@@ -126,47 +131,45 @@ int SourcePanelMethod(Airfoil &airfoil,char* path,Vector2 v)
 				S=airfoil.Panels[j].GetLength();
 				S2=airfoil.Panels[j].GetLengthSqure();
 				E=sqrt(B-A*A);
-				mat[i][j]=(C/2)*log((S2+2*A*S+B)/B)+((D-A*C)/E)*(atan((S+A)/E)-atan(A/E));
-				mat2[i][j]=((D-A*C)/(2*E))*log((S2+2*A*S+B)/B)-C*(atan((S+A)/E)-atan(A/E));
+				gsl_matrix_set(mat,i,j,(C/2)*log((S2+2*A*S+B)/B)+((D-A*C)/E)*(atan((S+A)/E)-atan(A/E)));
+				gsl_matrix_set(mat2,i,j,((D-A*C)/(2*E))*log((S2+2*A*S+B)/B)-C*(atan((S+A)/E)-atan(A/E)));
 			}
 		}
 	}
 
 	printf("Equation Num=%d\n",n);
 	printf("Solving equations...\n");
-	MathHelper::GaussianElimination(mat,l,ans,n);//解方程组
+
+    int s;
+    gsl_linalg_LU_decomp(mat,p,&s);
+    gsl_linalg_LU_solve(mat,p,b,strength);
+
 	//计算压力系数
 	for(int i=0;i<n;i++)
 	{
-		cp[i]=0;
-		for(int j=0;j<n;j++)
-		{
-			cp[i]+=mat2[i][j]*ans[j]/(2*PI);
-		}
-		cp[i]+=v.GetLength()*cos(airfoil.Panels[i].GetAngle());
-		cp[i]=1-(cp[i]*cp[i])/v.GetLengthSqure();
+		gsl_vector_set(cp,i,cos(airfoil.Panels[i].GetAngle()));
 	}
+	gsl_blas_dgemv(CblasNoTrans,1.0/(2*PI),mat2,strength,v.GetLength(),cp);
 
 	printf("Saving...\n");
-	//out<<setiosflags(ios::scientific)<<setprecision(12);
+	out<<setiosflags(ios::scientific)<<setprecision(12);
 	for(int i=0;i<n;i++)
 	{
-		if(l[i]==0)
-			ans[i]=0;
-		if(fabs(ans[i])>1e20)
-			ans[i]=0;
-		out<<airfoil.Panels[i].GetMidpoint().x<<"\t"<<airfoil.Panels[i].GetMidpoint().y<<"\t"<<cp[i]<<endl;
+		double res=gsl_vector_get(cp,i);
+		res=1-(res*res)/v.GetLengthSqure();
+		out<<airfoil.Panels[i].GetMidpoint().x<<"\t"<<airfoil.Panels[i].GetMidpoint().y<<"\t"<<res<<endl;
 	}
 
-
 	printf("Disposing memory...\n");
-	delete(mat);
-	delete(mat2);
-	delete(cp);
-	delete(l);
-	delete(ans);
+	gsl_matrix_free(mat);
+	gsl_matrix_free(mat2);
+	gsl_vector_free(strength);
+	gsl_vector_free(b);
+	gsl_vector_free(cp);
+	gsl_permutation_free(p);
 	out.close();
 	printf("Calc Successful.\n");
 	return 0;
 }
+
 
